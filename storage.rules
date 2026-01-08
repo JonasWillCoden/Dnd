@@ -1,0 +1,21 @@
+﻿rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(guildId) {
+      return signedIn()
+        && firestore.get(/databases/(default)/documents/guilds/$(guildId)/members/$(request.auth.uid)).exists();
+    }
+
+    match /users/{userId}/{allPaths=**} {
+      allow read, write: if signedIn() && request.auth.uid == userId;
+    }
+
+    match /guilds/{guildId}/{allPaths=**} {
+      allow read, write: if isMember(guildId);
+    }
+  }
+}

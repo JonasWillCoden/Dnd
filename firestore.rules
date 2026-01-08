@@ -1,0 +1,71 @@
+﻿rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isMember(guildId) {
+      return signedIn() && exists(/databases/$(database)/documents/guilds/$(guildId)/members/$(request.auth.uid));
+    }
+
+    function isAdmin(guildId) {
+      return isMember(guildId) && get(/databases/$(database)/documents/guilds/$(guildId)/members/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    match /users/{userId} {
+      allow read, create, update: if signedIn() && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
+    match /inviteCodes/{code} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.createdBy == request.auth.uid;
+      allow delete: if signedIn()
+        && (
+          resource.data.createdBy == request.auth.uid
+          || (resource.data.guildId is string && isMember(resource.data.guildId))
+        );
+      allow update: if false;
+    }
+
+    match /guilds/{guildId} {
+      allow create: if signedIn();
+      allow read: if isMember(guildId);
+      allow update: if isAdmin(guildId);
+      allow delete: if isAdmin(guildId) || isMember(guildId);
+
+      match /members/{memberId} {
+        allow read: if isMember(guildId)
+          || request.auth.uid == memberId
+          || (resource.data.userId == request.auth.uid);
+        allow create: if signedIn()
+          && request.auth.uid == memberId
+          && request.resource.data.inviteCode is string
+          && exists(/databases/$(database)/documents/inviteCodes/$(request.resource.data.inviteCode))
+          && get(/databases/$(database)/documents/inviteCodes/$(request.resource.data.inviteCode)).data.guildId == guildId;
+        allow update: if isAdmin(guildId)
+          || (request.auth.uid == memberId && request.resource.data.role == resource.data.role);
+        allow delete: if isAdmin(guildId) || request.auth.uid == memberId;
+      }
+
+      match /calendar/{dayId} {
+        allow read, write: if isMember(guildId);
+      }
+
+      match /safety/{docId} {
+        allow read, write: if isMember(guildId);
+      }
+
+      match /snacks/{docId} {
+        allow read, write: if isMember(guildId);
+      }
+
+      match /rules/{docId} {
+        allow read: if isMember(guildId);
+        allow create, update: if isAdmin(guildId);
+        allow delete: if isAdmin(guildId) || isMember(guildId);
+      }
+    }
+  }
+}
