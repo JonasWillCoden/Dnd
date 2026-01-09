@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useState } from 'react';
+﻿import React, { useEffect, useRef, useState } from 'react';
 import {
   Scroll,
   Pizza,
@@ -10,6 +10,8 @@ import {
   ArrowRight,
   Gem,
   Map,
+  MessageCircle,
+  X,
   LogIn,
   Settings,
   LogOut,
@@ -27,10 +29,13 @@ import {
   doc,
   getDoc,
   getDocs,
+  increment,
+  limit,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
+  startAfter,
   setDoc,
   updateDoc,
   writeBatch,
@@ -51,6 +56,107 @@ import { auth, db } from './firebase.js';
 import logo from './assets/logo.png';
 
 const weekDays = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
+
+const defaultXpTable = [
+  { level: 1, xp: 0 },
+  { level: 2, xp: 300 },
+  { level: 3, xp: 900 },
+  { level: 4, xp: 2700 },
+  { level: 5, xp: 6500 },
+  { level: 6, xp: 14000 },
+  { level: 7, xp: 23000 },
+  { level: 8, xp: 34000 },
+  { level: 9, xp: 48000 },
+  { level: 10, xp: 64000 },
+  { level: 11, xp: 85000 },
+  { level: 12, xp: 100000 },
+  { level: 13, xp: 120000 },
+  { level: 14, xp: 140000 },
+  { level: 15, xp: 165000 },
+  { level: 16, xp: 195000 },
+  { level: 17, xp: 225000 },
+  { level: 18, xp: 265000 },
+  { level: 19, xp: 305000 },
+  { level: 20, xp: 355000 },
+];
+
+const TENOR_API_KEY = import.meta.env.VITE_TENOR_KEY || 'LIVDSRZULELA';
+const TENOR_CLIENT_KEY = 'guildhall';
+const GIPHY_PUBLIC_KEY = 'dc6zaTOxFJmzC';
+const GIF_SEARCH_ENABLED = false;
+
+const normalizeXpTable = (table) =>
+  (Array.isArray(table) ? table : [])
+    .map((row) => ({
+      level: Number.parseInt(row.level, 10),
+      xp: Number.parseInt(row.xp, 10),
+    }))
+    .filter((row) => Number.isFinite(row.level) && Number.isFinite(row.xp))
+    .sort((a, b) => a.level - b.level);
+
+const getLevelForXp = (xp, table) => {
+  const safeXp = Number.isFinite(xp) ? xp : 0;
+  const normalized = normalizeXpTable(table);
+  if (normalized.length === 0) {
+    return { level: 1, nextXp: null };
+  }
+  let level = normalized[0].level;
+  let nextXp = null;
+  for (let i = 0; i < normalized.length; i += 1) {
+    if (safeXp >= normalized[i].xp) {
+      level = normalized[i].level;
+      nextXp = normalized[i + 1] ? normalized[i + 1].xp : null;
+    } else {
+      nextXp = normalized[i].xp;
+      break;
+    }
+  }
+  return { level, nextXp };
+};
+
+const deriveGifUrlFromText = (text) => {
+  if (!text) return '';
+  const trimmed = text.trim();
+  const directGif = trimmed.match(/https?:\/\/\S+\.gif(\?\S*)?$/i);
+  if (directGif?.[0]) return directGif[0];
+  const mediaGiphy = trimmed.match(/https?:\/\/media\.giphy\.com\/media\/([a-zA-Z0-9]+)\/giphy\.gif/i);
+  if (mediaGiphy?.[0]) return mediaGiphy[0];
+  const giphyMatch = trimmed.match(/giphy\.com\/(?:gifs|media)\/[^/]*-([a-zA-Z0-9]+)/i);
+  if (giphyMatch?.[1]) {
+    return `https://media.giphy.com/media/${giphyMatch[1]}/giphy.gif`;
+  }
+  const tenorMatch = trimmed.match(/tenor\.com\/view\/[^/]*-(\d+)/i);
+  if (tenorMatch?.[1]) {
+    return `https://media.tenor.com/${tenorMatch[1]}/tenor.gif`;
+  }
+  return '';
+};
+
+const normalizeGifUrl = async (url) => {
+  if (!url) return '';
+  const trimmed = url.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return '';
+  const derived = deriveGifUrlFromText(trimmed);
+  if (derived) return derived;
+  if (trimmed.includes('media.giphy.com') || trimmed.endsWith('.gif')) {
+    return trimmed;
+  }
+  const giphyMatch = trimmed.match(/giphy\.com\/(?:gifs|media)\/[^/]*-([a-zA-Z0-9]+)/);
+  if (giphyMatch?.[1]) {
+    return `https://media.giphy.com/media/${giphyMatch[1]}/giphy.gif`;
+  }
+  if (trimmed.includes('tenor.com')) {
+    try {
+      const res = await fetch(`https://tenor.com/oembed?url=${encodeURIComponent(trimmed)}`);
+      if (!res.ok) return '';
+      const data = await res.json();
+      return data?.url || '';
+    } catch {
+      return '';
+    }
+  }
+  return '';
+};
 
 const avatarPresets = [
   "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120'><rect width='120' height='120' fill='%23130f0c'/><polygon points='60,18 96,46 82,96 38,96 24,46' fill='%23d97706'/><text x='60' y='70' text-anchor='middle' font-size='28' fill='%23130f0c' font-family='Cinzel,serif'>20</text></svg>",
@@ -258,74 +364,376 @@ const MembersView = ({
   membersLoading,
   membersError,
   onKickMember,
+  onGrantXp,
   isAdmin,
   currentUserId,
-}) => (
-  <div className="space-y-6 animate-fade-slide">
-    <div className="rpg-panel p-4 sm:p-6 rounded-md">
-      <div className="mb-6 border-b border-stone-800 pb-4">
-        <h2 className="text-2xl text-amber-500 flex items-center gap-3">
-          <span className="p-1.5 bg-stone-900 rounded border border-stone-800">
-            <Users className="w-5 h-5 text-amber-700" />
-          </span>
-          Member Roster
-        </h2>
-        <p className="text-stone-500 text-sm mt-1 font-body">Everyone inside the guild walls.</p>
-      </div>
+  xpTable,
+  guildCreatedBy,
+}) => {
+  const [grantInputs, setGrantInputs] = useState({});
 
-      {membersLoading && (
-        <div className="text-sm text-stone-500 italic">Loading members...</div>
-      )}
-      {membersError && (
-        <div className="text-xs text-red-400 border border-red-900/40 bg-red-950/40 py-2 rounded text-center mb-3">
-          {membersError}
+  const updateGrantInput = (memberId, value) => {
+    setGrantInputs((prev) => ({ ...prev, [memberId]: value }));
+  };
+
+  const handleGrant = (memberId) => {
+    const raw = grantInputs[memberId];
+    const amount = Number.parseInt(raw, 10);
+    if (!Number.isFinite(amount) || amount === 0) return;
+    onGrantXp(memberId, amount);
+    setGrantInputs((prev) => ({ ...prev, [memberId]: '' }));
+  };
+
+  return (
+    <div className="space-y-6 animate-fade-slide">
+      <div className="rpg-panel p-4 sm:p-6 rounded-md">
+        <div className="mb-6 border-b border-stone-800 pb-4">
+          <h2 className="text-2xl text-amber-500 flex items-center gap-3">
+            <span className="p-1.5 bg-stone-900 rounded border border-stone-800">
+              <Users className="w-5 h-5 text-amber-700" />
+            </span>
+            Member Roster
+          </h2>
+          <p className="text-stone-500 text-sm mt-1 font-body">
+            Everyone inside the guild walls. XP is shared view; only the DM can grant.
+          </p>
         </div>
-      )}
-      {!membersLoading && members.length === 0 && (
-        <div className="text-stone-700 italic pl-4 py-4 border-l-2 border-stone-800">
-          The hall is empty...
+
+        {membersLoading && (
+          <div className="text-sm text-stone-500 italic">Loading members...</div>
+        )}
+        {membersError && (
+          <div className="text-xs text-red-400 border border-red-900/40 bg-red-950/40 py-2 rounded text-center mb-3">
+            {membersError}
+          </div>
+        )}
+        {!membersLoading && members.length === 0 && (
+          <div className="text-stone-700 italic pl-4 py-4 border-l-2 border-stone-800">
+            The hall is empty...
+          </div>
+        )}
+        <div className="grid grid-cols-1 gap-3">
+          {members.map((member) => {
+            const xpValue = Number.isFinite(member.xp) ? member.xp : 0;
+            const levelInfo = getLevelForXp(xpValue, xpTable);
+            const nextXpLabel = levelInfo.nextXp ? `${levelInfo.nextXp} XP` : 'Max level';
+            const isDm = member.role === 'admin' || member.id === guildCreatedBy;
+            return (
+              <div
+                key={member.id}
+                className="bg-stone-950/50 border border-stone-800 p-3 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-sm group hover:border-stone-600 transition-all shadow-inner"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-full border border-stone-800 bg-stone-950 overflow-hidden flex items-center justify-center">
+                    {member.avatarUrl ? (
+                      <img src={member.avatarUrl} alt={member.displayName} className="w-full h-full object-cover" />
+                    ) : (
+                      <User size={16} className="text-stone-600" />
+                    )}
+                  </div>
+                  <div>
+                    <div className="text-sm text-stone-200 font-fantasy">
+                      {member.displayName || 'Unknown Adventurer'}
+                    </div>
+                    <div className="text-[10px] text-stone-600 uppercase tracking-[0.2em]">
+                      {isDm ? 'Dungeon Master' : 'Member'}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                  <div className="text-xs uppercase tracking-[0.2em] text-stone-500">
+                    Level {levelInfo.level} · {xpValue} XP
+                  </div>
+                  <div className="text-[10px] uppercase tracking-[0.2em] text-stone-600">
+                    Next: {nextXpLabel}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {isDm && <Crown size={14} className="text-amber-500" />}
+                    {isAdmin && (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          placeholder="+XP"
+                          className="w-20 rpg-input text-stone-200 px-2 py-1 rounded-sm text-xs font-body focus:outline-none placeholder:text-stone-700"
+                          value={grantInputs[member.id] || ''}
+                          onChange={(e) => updateGrantInput(member.id, e.target.value)}
+                        />
+                        <button
+                          onClick={() => handleGrant(member.id)}
+                          className="text-xs uppercase tracking-[0.2em] bg-amber-900/20 px-3 py-2 rounded-sm border border-amber-900/50 text-amber-400 hover:text-amber-300 transition-colors"
+                        >
+                          Give
+                        </button>
+                      </div>
+                    )}
+                    {isAdmin && member.id !== currentUserId && (
+                      <button
+                        onClick={() => onKickMember(member.id)}
+                        className="text-xs uppercase tracking-[0.2em] bg-red-900/20 px-3 py-2 rounded-sm border border-red-900/50 text-red-400 hover:text-red-300 transition-colors"
+                      >
+                        Kick
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      )}
-      <div className="grid grid-cols-1 gap-3">
-        {members.map((member) => (
-          <div
-            key={member.id}
-            className="bg-stone-950/50 border border-stone-800 p-3 flex justify-between items-center rounded-sm group hover:border-stone-600 transition-all shadow-inner"
+      </div>
+    </div>
+  );
+};
+
+const renderChatText = (text) => {
+  const parts = text.split(/(https?:\/\/[^\s]+)/g);
+  return parts.map((part, idx) => {
+    if (part.match(/https?:\/\/[^\s]+/)) {
+      return (
+        <a
+          key={`link-${idx}`}
+          href={part}
+          target="_blank"
+          rel="noreferrer"
+          className="text-amber-400 underline"
+        >
+          {part}
+        </a>
+      );
+    }
+    return <span key={`text-${idx}`}>{part}</span>;
+  });
+};
+
+const ChatView = ({
+  messages,
+  loading,
+  error,
+  hasMore,
+  onLoadMore,
+  chatInput,
+  setChatInput,
+  onSend,
+  gifOpen,
+  setGifOpen,
+  gifQuery,
+  setGifQuery,
+  gifResults,
+  gifLoading,
+  gifError,
+  onSendGif,
+  guilds,
+  chatGuildId,
+  setChatGuildId,
+  onClose,
+  autoScrollKey,
+}) => {
+  const bottomRef = useRef(null);
+
+  useEffect(() => {
+    if (bottomRef.current) {
+      bottomRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+  }, [autoScrollKey]);
+
+  return (
+  <div className="fixed bottom-6 right-6 z-[80] w-[320px] sm:w-[360px] rounded-2xl border border-stone-800 bg-[#14110e]/95 shadow-[0_20px_60px_rgba(0,0,0,0.6)] backdrop-blur-md overflow-hidden animate-fade">
+    <div className="flex items-center justify-between px-4 py-3 border-b border-stone-800">
+      <div className="flex items-center gap-2 text-sm text-amber-400 uppercase tracking-[0.2em] font-bold">
+        <MessageCircle size={14} />
+        Chat
+      </div>
+      <button
+        onClick={onClose}
+        className="text-stone-500 hover:text-amber-400 transition-colors"
+        aria-label="Close chat"
+      >
+        <X size={16} />
+      </button>
+    </div>
+
+    <div className="px-4 py-3 border-b border-stone-800 flex items-center gap-2">
+      <select
+        className="flex-1 bg-stone-950/70 border border-stone-800 text-stone-200 px-3 py-2 rounded-full text-xs uppercase tracking-[0.2em] focus:outline-none"
+        value={chatGuildId}
+        onChange={(e) => setChatGuildId(e.target.value)}
+      >
+        {guilds.length === 0 && <option value="">No guilds</option>}
+        {guilds.map((guild) => (
+          <option key={guild.guildId} value={guild.guildId}>
+            {guild.name}
+          </option>
+        ))}
+      </select>
+      <button
+        onClick={() => {
+          if (!GIF_SEARCH_ENABLED) return;
+          setGifOpen((prev) => !prev);
+        }}
+        className={`text-[10px] uppercase tracking-[0.2em] px-3 py-2 rounded-full border transition-colors ${
+          GIF_SEARCH_ENABLED
+            ? 'bg-stone-900/60 border-stone-800 text-stone-400 hover:text-amber-500'
+            : 'bg-stone-900/30 border-stone-900 text-stone-600 cursor-not-allowed'
+        }`}
+      >
+        {GIF_SEARCH_ENABLED ? 'GIFs' : 'GIFs soon'}
+      </button>
+    </div>
+
+    {gifOpen && GIF_SEARCH_ENABLED && (
+      <div className="px-4 py-3 border-b border-stone-800 space-y-3">
+        <input
+          type="text"
+          placeholder="Search GIFs..."
+          className="w-full rpg-input text-stone-200 px-3 py-2 rounded-sm text-sm font-body focus:outline-none placeholder:text-stone-700"
+          value={gifQuery}
+          onChange={(e) => setGifQuery(e.target.value)}
+        />
+        {gifLoading && <div className="text-xs text-stone-500">Searching...</div>}
+        {gifError && <div className="text-xs text-red-400">{gifError}</div>}
+        {!gifLoading && !gifError && gifResults.length === 0 && (
+          <div className="text-xs text-stone-600">No GIFs found.</div>
+        )}
+        <div className="grid grid-cols-3 gap-2">
+          {gifResults.map((gif) => {
+            const thumb = gif?.images?.fixed_width_small?.url
+              || gif?.images?.fixed_width?.url
+              || gif?.images?.original?.url
+              || gif?.media_formats?.tinygif?.url
+              || gif?.media_formats?.gif?.url;
+            if (!thumb) return null;
+            return (
+              <button
+                key={gif.id || thumb}
+                onClick={() => onSendGif(gif)}
+                className="rounded-sm overflow-hidden border border-stone-800 hover:border-amber-600/60 transition-colors"
+              >
+                <img src={thumb} alt={gif.content_description || 'GIF'} className="w-full h-full object-cover" />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    )}
+
+    {error && (
+      <div className="text-xs text-red-400 border border-red-900/40 bg-red-950/40 py-2 rounded text-center m-3">
+        {error}
+      </div>
+    )}
+
+    <div className="px-4 pb-3 space-y-3">
+      <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb">
+        {hasMore && (
+          <button
+            onClick={onLoadMore}
+            className="w-full text-[10px] uppercase tracking-[0.2em] bg-stone-900/60 px-3 py-2 rounded-full border border-stone-800 text-stone-400 hover:text-amber-500 transition-colors"
           >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-full border border-stone-800 bg-stone-950 overflow-hidden flex items-center justify-center">
-                {member.avatarUrl ? (
-                  <img src={member.avatarUrl} alt={member.displayName} className="w-full h-full object-cover" />
+            Load older messages
+          </button>
+        )}
+        {loading && <div className="text-sm text-stone-500 italic">Loading chat...</div>}
+        {messages.length === 0 && !loading && (
+          <div className="text-stone-700 italic">No messages yet. Start the tale.</div>
+        )}
+        {messages.map((msg) => {
+          const time =
+            msg.createdAt?.toDate?.() instanceof Date
+              ? msg.createdAt.toDate().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
+              : '';
+          return (
+            <div key={msg.id} className="flex gap-3 items-start">
+              <div className="w-8 h-8 rounded-full border border-stone-800 bg-stone-950 overflow-hidden flex items-center justify-center">
+                {msg.avatarUrl ? (
+                  <img src={msg.avatarUrl} alt={msg.displayName} className="w-full h-full object-cover" />
                 ) : (
-                  <User size={16} className="text-stone-600" />
+                  <User size={12} className="text-stone-600" />
                 )}
               </div>
-              <div>
-                <div className="text-sm text-stone-200 font-fantasy">
-                  {member.displayName || 'Unknown Adventurer'}
+              <div className="flex-1">
+                <div className="text-[10px] uppercase tracking-[0.2em] text-stone-500">
+                  {msg.displayName || 'Unknown'} {time && <span className="ml-2 text-stone-600">{time}</span>}
                 </div>
-                <div className="text-[10px] text-stone-600 uppercase tracking-[0.2em]">
-                  {member.role === 'admin' ? 'Dungeon Master' : 'Member'}
-                </div>
+                {msg.type === 'gif' && msg.gifUrl ? (
+                  <div className="mt-2 space-y-1">
+                    <img
+                      src={msg.gifUrl}
+                      alt="GIF"
+                      className="max-w-[200px] rounded-sm border border-stone-800"
+                    />
+                    <a
+                      href={msg.gifUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[9px] uppercase tracking-[0.2em] text-stone-500 hover:text-amber-400 transition-colors"
+                    >
+                      Open GIF
+                    </a>
+                  </div>
+                ) : (() => {
+                  const derivedGif = deriveGifUrlFromText(msg.text || '');
+                  if (derivedGif) {
+                    return (
+                      <div className="mt-2 space-y-1">
+                        <img
+                          src={derivedGif}
+                          alt="GIF"
+                          className="max-w-[200px] rounded-sm border border-stone-800"
+                        />
+                        <a
+                          href={derivedGif}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-[9px] uppercase tracking-[0.2em] text-stone-500 hover:text-amber-400 transition-colors"
+                        >
+                          Open GIF
+                        </a>
+                      </div>
+                    );
+                  }
+                  return <div className="text-sm text-stone-200 mt-1">{renderChatText(msg.text || '')}</div>;
+                })()}
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              {member.role === 'admin' && <Crown size={14} className="text-amber-500" />}
-              {isAdmin && member.id !== currentUserId && (
-                <button
-                  onClick={() => onKickMember(member.id)}
-                  className="text-xs uppercase tracking-[0.2em] bg-red-900/20 px-3 py-2 rounded-sm border border-red-900/50 text-red-400 hover:text-red-300 transition-colors"
-                >
-                  Kick
-                </button>
-              )}
+          );
+        })}
+        <div ref={bottomRef} />
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder="Message or GIF URL..."
+            className="flex-1 rpg-input text-stone-200 px-3 py-2 rounded-full text-sm font-body focus:outline-none placeholder:text-stone-700"
+            value={chatInput}
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && onSend()}
+          />
+          <button
+            onClick={onSend}
+            className="fantasy-btn bg-amber-900/20 hover:bg-amber-800/40 text-amber-500 border border-amber-900/50 px-4 py-2 rounded-full transition-all text-xs uppercase tracking-widest"
+          >
+            Send
+          </button>
+        </div>
+        {deriveGifUrlFromText(chatInput) && (
+          <div className="border border-stone-800 rounded-sm bg-stone-950/60 p-2">
+            <div className="text-[9px] uppercase tracking-[0.2em] text-stone-500 mb-2">
+              GIF preview
             </div>
+            <img
+              src={deriveGifUrlFromText(chatInput)}
+              alt="GIF preview"
+              className="max-w-[200px] rounded-sm border border-stone-800"
+            />
           </div>
-        ))}
+        )}
       </div>
     </div>
   </div>
-);
+  );
+};
 
 const RulesView = ({
   rules,
@@ -1002,6 +1410,20 @@ const App = () => {
   const [membersError, setMembersError] = useState('');
   const [rules, setRules] = useState([]);
   const [snacks, setSnacks] = useState([]);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatError, setChatError] = useState('');
+  const [chatLastDoc, setChatLastDoc] = useState(null);
+  const [chatHasMore, setChatHasMore] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatGuildId, setChatGuildId] = useState('');
+  const [chatAutoScrollKey, setChatAutoScrollKey] = useState(0);
+  const [gifOpen, setGifOpen] = useState(false);
+  const [gifQuery, setGifQuery] = useState('');
+  const [gifResults, setGifResults] = useState([]);
+  const [gifLoading, setGifLoading] = useState(false);
+  const [gifError, setGifError] = useState('');
   const [userGuilds, setUserGuilds] = useState([]);
   const [guildsLoading, setGuildsLoading] = useState(false);
   const [guildsError, setGuildsError] = useState('');
@@ -1017,8 +1439,10 @@ const App = () => {
   const [newRuleDesc, setNewRuleDesc] = useState('');
   const [newSnackItem, setNewSnackItem] = useState('');
   const [profileForm, setProfileForm] = useState({ displayName: '', bio: '', avatarUrl: '' });
-  const [guildForm, setGuildForm] = useState({ name: '', description: '', imageUrl: '' });
+  const [guildForm, setGuildForm] = useState({ name: '', description: '', imageUrl: '', xpTable: [] });
   const [profileAvatarPreview, setProfileAvatarPreview] = useState('');
+  const [xpLevelInput, setXpLevelInput] = useState('');
+  const [xpValueInput, setXpValueInput] = useState('');
   const [guildImagePreview, setGuildImagePreview] = useState('');
   const [profileSaving, setProfileSaving] = useState(false);
   const [guildSaving, setGuildSaving] = useState(false);
@@ -1213,6 +1637,15 @@ const App = () => {
   }, [authUser, activeGuildId]);
 
   useEffect(() => {
+    if (!authUser || !activeGuildId || !guildData) return;
+    if (guildData.createdBy === authUser.uid && memberRole !== 'admin') {
+      updateDoc(doc(db, 'guilds', activeGuildId, 'members', authUser.uid), {
+        role: 'admin',
+      }).catch(() => {});
+    }
+  }, [authUser, activeGuildId, guildData, memberRole]);
+
+  useEffect(() => {
     if (!authUser || !activeGuildId) return;
     setDoc(
       doc(db, 'users', authUser.uid),
@@ -1330,6 +1763,93 @@ const App = () => {
   }, [authUser, activeGuildId]);
 
   useEffect(() => {
+    if (!authUser || !chatGuildId) {
+      setChatMessages([]);
+      setChatLoading(false);
+      setChatError('');
+      setChatLastDoc(null);
+      setChatHasMore(false);
+      return undefined;
+    }
+    setChatLoading(true);
+    setChatError('');
+    const baseQuery = query(
+      collection(db, 'guilds', chatGuildId, 'chat'),
+      orderBy('createdAt', 'desc'),
+      limit(50)
+    );
+    const unsub = onSnapshot(
+      baseQuery,
+      (snap) => {
+        const docs = snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+      setChatMessages(docs.reverse());
+      setChatLastDoc(snap.docs[snap.docs.length - 1] || null);
+      setChatHasMore(snap.docs.length === 50);
+      setChatLoading(false);
+      setChatAutoScrollKey((prev) => prev + 1);
+    },
+      (err) => {
+        setChatLoading(false);
+        setChatError(err?.message || 'Failed to load chat.');
+      }
+    );
+    return () => unsub();
+  }, [authUser, chatGuildId]);
+
+  useEffect(() => {
+    if (!gifOpen || !GIF_SEARCH_ENABLED) return undefined;
+    const queryText = gifQuery.trim();
+    setGifLoading(true);
+    setGifError('');
+    const timer = setTimeout(() => {
+      const endpoint = queryText
+        ? `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_PUBLIC_KEY}&q=${encodeURIComponent(
+            queryText
+          )}&limit=12&rating=pg`
+        : `https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_PUBLIC_KEY}&limit=12&rating=pg`;
+      fetch(endpoint)
+        .then(async (res) => {
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(text || `HTTP ${res.status}`);
+          }
+          return res.json();
+        })
+        .then((data) => {
+          const results = Array.isArray(data?.data) ? data.data : [];
+          setGifResults(results);
+        })
+        .catch((err) => {
+          setGifError(`Failed to load GIFs. ${err?.message || ''}`.trim());
+        })
+        .finally(() => {
+          setGifLoading(false);
+        });
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [gifOpen, gifQuery]);
+
+  useEffect(() => {
+    if (!authUser) {
+      setChatGuildId('');
+      return;
+    }
+    if (activeGuildId) {
+      setChatGuildId(activeGuildId);
+      return;
+    }
+    if (userGuilds.length > 0) {
+      setChatGuildId(userGuilds[0].guildId);
+    }
+  }, [authUser, activeGuildId, userGuilds]);
+
+  useEffect(() => {
+    if (chatOpen) {
+      setChatAutoScrollKey((prev) => prev + 1);
+    }
+  }, [chatOpen, chatGuildId]);
+
+  useEffect(() => {
     setProfileForm({
       displayName: profile.displayName || '',
       bio: profile.bio || '',
@@ -1343,6 +1863,7 @@ const App = () => {
       name: guildData.name || '',
       description: guildData.description || '',
       imageUrl: guildData.imageUrl || '',
+      xpTable: Array.isArray(guildData.xpTable) ? guildData.xpTable : [],
     });
   }, [guildData]);
 
@@ -1410,6 +1931,7 @@ const App = () => {
         name: guildForm.name.trim(),
         description: guildForm.description.trim(),
         imageUrl,
+        xpTable: Array.isArray(guildForm.xpTable) ? guildForm.xpTable : [],
       });
     } finally {
       setGuildSaving(false);
@@ -1426,10 +1948,40 @@ const App = () => {
         name: nextGuild.name.trim(),
         description: nextGuild.description.trim(),
         imageUrl: preset,
+        xpTable: Array.isArray(nextGuild.xpTable) ? nextGuild.xpTable : [],
       });
     } finally {
       setGuildSaving(false);
     }
+  };
+
+  const handleAddXpRow = () => {
+    if (!isAdmin) return;
+    const level = Number.parseInt(xpLevelInput, 10);
+    const xp = Number.parseInt(xpValueInput, 10);
+    if (!Number.isFinite(level) || !Number.isFinite(xp) || level <= 0 || xp < 0) return;
+    const next = Array.isArray(guildForm.xpTable) ? [...guildForm.xpTable] : [];
+    const existingIndex = next.findIndex((row) => row.level === level);
+    if (existingIndex >= 0) {
+      next[existingIndex] = { level, xp };
+    } else {
+      next.push({ level, xp });
+    }
+    next.sort((a, b) => a.level - b.level);
+    setGuildForm({ ...guildForm, xpTable: next });
+    setXpLevelInput('');
+    setXpValueInput('');
+  };
+
+  const handleRemoveXpRow = (level) => {
+    if (!isAdmin) return;
+    const next = (guildForm.xpTable || []).filter((row) => row.level !== level);
+    setGuildForm({ ...guildForm, xpTable: next });
+  };
+
+  const handleLoadDefaultXp = () => {
+    if (!isAdmin) return;
+    setGuildForm({ ...guildForm, xpTable: defaultXpTable });
   };
 
   const leaveGuild = async (guildId) => {
@@ -1578,6 +2130,7 @@ const App = () => {
         description: draft.description?.trim() || '',
         imageUrl: draft.imageUrl || '',
         inviteCode,
+        xpTable: defaultXpTable,
         createdAt: serverTimestamp(),
         createdBy: authUser.uid,
       });
@@ -1592,6 +2145,7 @@ const App = () => {
         userId: authUser.uid,
         displayName: profile.displayName,
         avatarUrl: profile.avatarUrl || '',
+        xp: 0,
         role: 'admin',
         inviteCode,
         joinedAt: serverTimestamp(),
@@ -1656,6 +2210,7 @@ const App = () => {
           userId: authUser.uid,
           displayName: profile.displayName,
           avatarUrl: profile.avatarUrl || '',
+          xp: 0,
           role: 'member',
           inviteCode: cleanedCode,
           joinedAt: serverTimestamp(),
@@ -1709,6 +2264,19 @@ const App = () => {
     }
   };
 
+  const grantMemberXp = async (memberId, amount) => {
+    if (!authUser || !activeGuildId || !isAdmin) return;
+    const safeAmount = Number.isFinite(amount) ? amount : 0;
+    if (!safeAmount) return;
+    try {
+      await updateDoc(doc(db, 'guilds', activeGuildId, 'members', memberId), {
+        xp: increment(safeAmount),
+      });
+    } catch (err) {
+      setMembersError(err?.message || 'Failed to grant XP.');
+    }
+  };
+
   const addRule = async () => {
     if (!newRuleTitle.trim() || !activeGuildId || !isAdmin) return;
     await addDoc(collection(db, 'guilds', activeGuildId, 'rules'), {
@@ -1748,6 +2316,81 @@ const App = () => {
     await updateDoc(doc(db, 'guilds', activeGuildId, 'snacks', snack.id), {
       brought: !snack.brought,
     });
+  };
+
+  const sendChatMessage = async () => {
+    if (!authUser || !chatGuildId) return;
+    const text = chatInput.trim();
+    if (!text) return;
+    try {
+      const normalizedGif = await normalizeGifUrl(text);
+      if (normalizedGif) {
+        await addDoc(collection(db, 'guilds', chatGuildId, 'chat'), {
+          type: 'gif',
+          gifUrl: normalizedGif,
+          createdAt: serverTimestamp(),
+          createdBy: authUser.uid,
+          displayName: profile.displayName,
+          avatarUrl: profile.avatarUrl || '',
+        });
+        setChatInput('');
+        setChatAutoScrollKey((prev) => prev + 1);
+        return;
+      }
+      await addDoc(collection(db, 'guilds', chatGuildId, 'chat'), {
+        type: 'text',
+        text,
+        createdAt: serverTimestamp(),
+        createdBy: authUser.uid,
+        displayName: profile.displayName,
+        avatarUrl: profile.avatarUrl || '',
+      });
+      setChatInput('');
+      setChatAutoScrollKey((prev) => prev + 1);
+    } catch (err) {
+      setChatError(err?.message || 'Failed to send message.');
+    }
+  };
+
+  const sendGifMessage = async (gif) => {
+    if (!authUser || !chatGuildId) return;
+    const giphyUrl = gif?.images?.fixed_width?.url || gif?.images?.original?.url;
+    const tenorUrl = gif?.media_formats?.gif?.url || gif?.media_formats?.tinygif?.url;
+    const gifUrl = giphyUrl || tenorUrl;
+    if (!gifUrl) return;
+    try {
+      await addDoc(collection(db, 'guilds', chatGuildId, 'chat'), {
+        type: 'gif',
+        gifUrl,
+        createdAt: serverTimestamp(),
+        createdBy: authUser.uid,
+        displayName: profile.displayName,
+        avatarUrl: profile.avatarUrl || '',
+      });
+      setGifOpen(false);
+      setGifQuery('');
+    } catch (err) {
+      setChatError(err?.message || 'Failed to send GIF.');
+    }
+  };
+
+  const loadMoreChat = async () => {
+    if (!authUser || !chatGuildId || !chatLastDoc || !chatHasMore) return;
+    try {
+      const olderQuery = query(
+        collection(db, 'guilds', chatGuildId, 'chat'),
+        orderBy('createdAt', 'desc'),
+        startAfter(chatLastDoc),
+        limit(50)
+      );
+      const snap = await getDocs(olderQuery);
+      const docs = snap.docs.map((docSnap) => ({ id: docSnap.id, ...docSnap.data() }));
+      setChatMessages((prev) => [...docs.reverse(), ...prev]);
+      setChatLastDoc(snap.docs[snap.docs.length - 1] || chatLastDoc);
+      setChatHasMore(snap.docs.length === 50);
+    } catch (err) {
+      setChatError(err?.message || 'Failed to load more messages.');
+    }
   };
 
   if (!authReady) {
@@ -2120,8 +2763,11 @@ const App = () => {
               membersLoading={membersLoading}
               membersError={membersError}
               onKickMember={kickMember}
+              onGrantXp={grantMemberXp}
               isAdmin={isAdmin}
               currentUserId={authUser?.uid || ''}
+              xpTable={guildData?.xpTable?.length ? guildData.xpTable : defaultXpTable}
+              guildCreatedBy={guildData?.createdBy}
             />
           ) : (
             <div className="rpg-panel p-4 sm:p-6 rounded-md text-stone-500">
@@ -2188,6 +2834,13 @@ const App = () => {
               onLeaveGuild={() => leaveGuild(activeGuildId)}
               leaveError={leaveError}
               onSelectGuildImage={handleSelectGuildImage}
+              xpLevelInput={xpLevelInput}
+              xpValueInput={xpValueInput}
+              setXpLevelInput={setXpLevelInput}
+              setXpValueInput={setXpValueInput}
+              onAddXpRow={handleAddXpRow}
+              onRemoveXpRow={handleRemoveXpRow}
+              onLoadDefaultXp={handleLoadDefaultXp}
             />
           ) : (
             <div className="rpg-panel p-4 sm:p-6 rounded-md text-stone-500">
@@ -2196,6 +2849,42 @@ const App = () => {
           )
         )}
       </div>
+
+      {chatOpen && (
+        <ChatView
+          messages={chatMessages}
+          loading={chatLoading}
+          error={chatError}
+          hasMore={chatHasMore}
+          onLoadMore={loadMoreChat}
+          chatInput={chatInput}
+          setChatInput={setChatInput}
+          onSend={sendChatMessage}
+          gifOpen={gifOpen}
+          setGifOpen={setGifOpen}
+          gifQuery={gifQuery}
+          setGifQuery={setGifQuery}
+          gifResults={gifResults}
+          gifLoading={gifLoading}
+          gifError={gifError}
+          onSendGif={sendGifMessage}
+          guilds={userGuilds}
+          chatGuildId={chatGuildId}
+          setChatGuildId={setChatGuildId}
+          onClose={() => setChatOpen(false)}
+          autoScrollKey={chatAutoScrollKey}
+        />
+      )}
+
+      {!chatOpen && authUser && (
+        <button
+          onClick={() => setChatOpen(true)}
+          className="fixed bottom-6 right-6 z-[70] w-14 h-14 rounded-full bg-amber-900/30 border border-amber-900/60 text-amber-400 shadow-[0_10px_30px_rgba(0,0,0,0.6)] flex items-center justify-center hover:text-amber-200 hover:border-amber-500 transition-colors"
+          aria-label="Open chat"
+        >
+          <MessageCircle size={20} />
+        </button>
+      )}
     </div>
   );
 };
@@ -2700,6 +3389,13 @@ const GuildSettingsView = ({
   onLeaveGuild,
   leaveError,
   onSelectGuildImage,
+  xpLevelInput,
+  xpValueInput,
+  setXpLevelInput,
+  setXpValueInput,
+  onAddXpRow,
+  onRemoveXpRow,
+  onLoadDefaultXp,
 }) => (
   <div className="space-y-6 animate-fade-slide">
     <div className="rpg-panel p-4 sm:p-6 rounded-md">
@@ -2770,6 +3466,74 @@ const GuildSettingsView = ({
     </div>
 
     <div className="rpg-panel p-4 sm:p-6 rounded-md">
+      <div className="mb-6 border-b border-stone-800 pb-4">
+        <h3 className="text-xl text-amber-500 font-fantasy flex items-center gap-2">
+          <Gem size={18} className="text-amber-700" />
+          XP table
+        </h3>
+        <p className="text-stone-500 text-sm font-body">
+          Standard DnD 5e progression. Admins can edit or replace.
+        </p>
+      </div>
+
+      <div className={`space-y-4 ${isAdmin ? '' : 'opacity-50 pointer-events-none'}`}>
+        <button
+          onClick={onLoadDefaultXp}
+          className="text-left text-xs uppercase tracking-[0.2em] bg-stone-900/60 px-4 py-3 rounded-sm border border-stone-800 text-stone-400 hover:text-amber-500 transition-colors"
+        >
+          Load standard 5e table
+        </button>
+
+        <div className="grid grid-cols-2 gap-2">
+          <input
+            type="number"
+            min="1"
+            placeholder="Level"
+            className="rpg-input text-stone-200 px-3 py-2 rounded-sm text-sm font-body focus:outline-none placeholder:text-stone-700"
+            value={xpLevelInput}
+            onChange={(e) => setXpLevelInput(e.target.value)}
+          />
+          <input
+            type="number"
+            min="0"
+            placeholder="XP"
+            className="rpg-input text-stone-200 px-3 py-2 rounded-sm text-sm font-body focus:outline-none placeholder:text-stone-700"
+            value={xpValueInput}
+            onChange={(e) => setXpValueInput(e.target.value)}
+          />
+        </div>
+        <button
+          onClick={onAddXpRow}
+          className="fantasy-btn bg-amber-900/20 hover:bg-amber-800/40 text-amber-500 border border-amber-900/50 px-6 py-2 rounded-sm transition-all text-sm uppercase tracking-widest"
+        >
+          Add row
+        </button>
+
+        <div className="grid gap-2">
+          {(guildForm.xpTable || []).length === 0 && (
+            <div className="text-stone-600 text-sm">No XP table yet.</div>
+          )}
+          {(guildForm.xpTable || []).map((row) => (
+            <div
+              key={row.level}
+              className="flex items-center justify-between bg-stone-950/60 border border-stone-800 rounded-sm px-3 py-2"
+            >
+              <div className="text-sm text-stone-300 font-mono">
+                Level {row.level} · {row.xp} XP
+              </div>
+              <button
+                onClick={() => onRemoveXpRow(row.level)}
+                className="text-xs uppercase tracking-[0.2em] bg-red-900/20 px-3 py-2 rounded-sm border border-red-900/50 text-red-400 hover:text-red-300 transition-colors"
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+
+    <div className="rpg-panel p-4 sm:p-6 rounded-md">
       <div className="mb-4 border-b border-stone-800 pb-4">
         <h3 className="text-lg text-amber-500 font-fantasy">Leave guild</h3>
         <p className="text-stone-500 text-xs font-body mt-1">
@@ -2792,3 +3556,5 @@ const GuildSettingsView = ({
 );
 
 export default App;
+
+

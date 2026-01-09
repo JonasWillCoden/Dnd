@@ -1,4 +1,4 @@
-﻿rules_version = '2';
+rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() {
@@ -9,8 +9,17 @@ service cloud.firestore {
       return signedIn() && exists(/databases/$(database)/documents/guilds/$(guildId)/members/$(request.auth.uid));
     }
 
+    function isCreator(guildId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/guilds/$(guildId)).data.createdBy == request.auth.uid;
+    }
+
     function isAdmin(guildId) {
-      return isMember(guildId) && get(/databases/$(database)/documents/guilds/$(guildId)/members/$(request.auth.uid)).data.role == 'admin';
+      return isMember(guildId)
+        && (
+          get(/databases/$(database)/documents/guilds/$(guildId)/members/$(request.auth.uid)).data.role == 'admin'
+          || isCreator(guildId)
+        );
     }
 
     match /users/{userId} {
@@ -45,6 +54,7 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/inviteCodes/$(request.resource.data.inviteCode))
           && get(/databases/$(database)/documents/inviteCodes/$(request.resource.data.inviteCode)).data.guildId == guildId;
         allow update: if isAdmin(guildId)
+          || (isCreator(guildId) && request.auth.uid == memberId)
           || (request.auth.uid == memberId && request.resource.data.role == resource.data.role);
         allow delete: if isAdmin(guildId) || request.auth.uid == memberId;
       }
@@ -59,6 +69,11 @@ service cloud.firestore {
 
       match /snacks/{docId} {
         allow read, write: if isMember(guildId);
+      }
+
+      match /chat/{msgId} {
+        allow read, create: if isMember(guildId);
+        allow update, delete: if false;
       }
 
       match /rules/{docId} {
