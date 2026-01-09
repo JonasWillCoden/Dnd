@@ -527,6 +527,8 @@ const ChatView = ({
   setChatGuildId,
   onClose,
   autoScrollKey,
+  maximized,
+  onToggleMaximize,
 }) => {
   const bottomRef = useRef(null);
 
@@ -537,19 +539,31 @@ const ChatView = ({
   }, [autoScrollKey]);
 
   return (
-  <div className="fixed bottom-6 right-6 z-[80] w-[320px] sm:w-[360px] rounded-2xl border border-stone-800 bg-[#14110e]/95 shadow-[0_20px_60px_rgba(0,0,0,0.6)] backdrop-blur-md overflow-hidden animate-fade">
+  <div
+    className={`fixed bottom-6 right-6 z-[80] rounded-2xl border border-stone-800 bg-[#14110e]/95 shadow-[0_20px_60px_rgba(0,0,0,0.6)] backdrop-blur-md overflow-hidden animate-fade ${
+      maximized ? 'w-[92vw] h-[80vh] md:w-[720px]' : 'w-[320px] sm:w-[360px] h-[520px]'
+    }`}
+  >
     <div className="flex items-center justify-between px-4 py-3 border-b border-stone-800">
       <div className="flex items-center gap-2 text-sm text-amber-400 uppercase tracking-[0.2em] font-bold">
         <MessageCircle size={14} />
         Chat
       </div>
-      <button
-        onClick={onClose}
-        className="text-stone-500 hover:text-amber-400 transition-colors"
-        aria-label="Close chat"
-      >
-        <X size={16} />
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onToggleMaximize}
+          className="text-stone-500 hover:text-amber-400 transition-colors text-xs uppercase tracking-[0.2em]"
+        >
+          {maximized ? 'Minimize' : 'Maximize'}
+        </button>
+        <button
+          onClick={onClose}
+          className="text-stone-500 hover:text-amber-400 transition-colors"
+          aria-label="Close chat"
+        >
+          <X size={16} />
+        </button>
+      </div>
     </div>
 
     <div className="px-4 py-3 border-b border-stone-800 flex items-center gap-2">
@@ -622,8 +636,8 @@ const ChatView = ({
       </div>
     )}
 
-    <div className="px-4 pb-3 space-y-3">
-      <div className="space-y-3 max-h-[45vh] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb">
+    <div className="px-4 pb-3 space-y-3 flex flex-col h-[calc(100%-148px)]">
+      <div className="space-y-3 flex-1 overflow-y-auto pr-1">
         {hasMore && (
           <button
             onClick={onLoadMore}
@@ -737,6 +751,7 @@ const ChatView = ({
 
 const RulesView = ({
   rules,
+  rulesError,
   removeRule,
   newRuleTitle,
   setNewRuleTitle,
@@ -762,6 +777,12 @@ const RulesView = ({
           {isAdmin ? 'Proclaim your edicts, ruler.' : 'The unbreakable laws of this realm.'}
         </p>
       </div>
+
+      {rulesError && (
+        <div className="rounded-sm border border-rose-900/60 bg-rose-950/40 px-4 py-2 text-sm text-rose-200">
+          {rulesError}
+        </div>
+      )}
 
       <div className="grid gap-4 pl-2">
         {rules.length === 0 && (
@@ -1409,6 +1430,7 @@ const App = () => {
   const [membersLoading, setMembersLoading] = useState(false);
   const [membersError, setMembersError] = useState('');
   const [rules, setRules] = useState([]);
+  const [rulesError, setRulesError] = useState('');
   const [snacks, setSnacks] = useState([]);
   const [chatMessages, setChatMessages] = useState([]);
   const [chatLoading, setChatLoading] = useState(false);
@@ -1419,6 +1441,7 @@ const App = () => {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatGuildId, setChatGuildId] = useState('');
   const [chatAutoScrollKey, setChatAutoScrollKey] = useState(0);
+  const [chatMaximized, setChatMaximized] = useState(false);
   const [gifOpen, setGifOpen] = useState(false);
   const [gifQuery, setGifQuery] = useState('');
   const [gifResults, setGifResults] = useState([]);
@@ -1659,6 +1682,7 @@ const App = () => {
       setScheduleData([]);
       setRules([]);
       setSnacks([]);
+      setRulesError('');
       return undefined;
     }
 
@@ -1701,15 +1725,23 @@ const App = () => {
       setScheduleData(next);
     });
 
-    const unsubRules = onSnapshot(rulesQuery, (snap) => {
-      setRules(
-        snap.docs.map((docSnap) => ({
-          id: docSnap.id,
-          title: docSnap.data().title,
-          desc: docSnap.data().desc,
-        }))
-      );
-    });
+    const unsubRules = onSnapshot(
+      rulesQuery,
+      (snap) => {
+        setRulesError('');
+        setRules(
+          snap.docs.map((docSnap) => ({
+            id: docSnap.id,
+            title: docSnap.data().title,
+            desc: docSnap.data().desc,
+          }))
+        );
+      },
+      (err) => {
+        setRules([]);
+        setRulesError(err?.message || 'Failed to load laws.');
+      }
+    );
 
     const unsubSnacks = onSnapshot(snacksQuery, (snap) => {
       setSnacks(
@@ -2279,18 +2311,28 @@ const App = () => {
 
   const addRule = async () => {
     if (!newRuleTitle.trim() || !activeGuildId || !isAdmin) return;
-    await addDoc(collection(db, 'guilds', activeGuildId, 'rules'), {
-      title: newRuleTitle.trim(),
-      desc: newRuleDesc.trim(),
-      createdAt: serverTimestamp(),
-    });
-    setNewRuleTitle('');
-    setNewRuleDesc('');
+    setRulesError('');
+    try {
+      await addDoc(collection(db, 'guilds', activeGuildId, 'rules'), {
+        title: newRuleTitle.trim(),
+        desc: newRuleDesc.trim(),
+        createdAt: serverTimestamp(),
+      });
+      setNewRuleTitle('');
+      setNewRuleDesc('');
+    } catch (err) {
+      setRulesError(err?.message || 'Failed to save the law.');
+    }
   };
 
   const removeRule = async (id) => {
     if (!activeGuildId || !isAdmin) return;
-    await deleteDoc(doc(db, 'guilds', activeGuildId, 'rules', id));
+    setRulesError('');
+    try {
+      await deleteDoc(doc(db, 'guilds', activeGuildId, 'rules', id));
+    } catch (err) {
+      setRulesError(err?.message || 'Failed to remove the law.');
+    }
   };
 
   const addSnack = async () => {
@@ -2779,6 +2821,7 @@ const App = () => {
           activeGuildId ? (
             <RulesView
               rules={rules}
+              rulesError={rulesError}
               removeRule={removeRule}
               newRuleTitle={newRuleTitle}
               setNewRuleTitle={setNewRuleTitle}
@@ -2834,13 +2877,6 @@ const App = () => {
               onLeaveGuild={() => leaveGuild(activeGuildId)}
               leaveError={leaveError}
               onSelectGuildImage={handleSelectGuildImage}
-              xpLevelInput={xpLevelInput}
-              xpValueInput={xpValueInput}
-              setXpLevelInput={setXpLevelInput}
-              setXpValueInput={setXpValueInput}
-              onAddXpRow={handleAddXpRow}
-              onRemoveXpRow={handleRemoveXpRow}
-              onLoadDefaultXp={handleLoadDefaultXp}
             />
           ) : (
             <div className="rpg-panel p-4 sm:p-6 rounded-md text-stone-500">
@@ -2873,6 +2909,8 @@ const App = () => {
           setChatGuildId={setChatGuildId}
           onClose={() => setChatOpen(false)}
           autoScrollKey={chatAutoScrollKey}
+          maximized={chatMaximized}
+          onToggleMaximize={() => setChatMaximized((prev) => !prev)}
         />
       )}
 
@@ -3389,13 +3427,6 @@ const GuildSettingsView = ({
   onLeaveGuild,
   leaveError,
   onSelectGuildImage,
-  xpLevelInput,
-  xpValueInput,
-  setXpLevelInput,
-  setXpValueInput,
-  onAddXpRow,
-  onRemoveXpRow,
-  onLoadDefaultXp,
 }) => (
   <div className="space-y-6 animate-fade-slide">
     <div className="rpg-panel p-4 sm:p-6 rounded-md">
@@ -3466,74 +3497,6 @@ const GuildSettingsView = ({
     </div>
 
     <div className="rpg-panel p-4 sm:p-6 rounded-md">
-      <div className="mb-6 border-b border-stone-800 pb-4">
-        <h3 className="text-xl text-amber-500 font-fantasy flex items-center gap-2">
-          <Gem size={18} className="text-amber-700" />
-          XP table
-        </h3>
-        <p className="text-stone-500 text-sm font-body">
-          Standard DnD 5e progression. Admins can edit or replace.
-        </p>
-      </div>
-
-      <div className={`space-y-4 ${isAdmin ? '' : 'opacity-50 pointer-events-none'}`}>
-        <button
-          onClick={onLoadDefaultXp}
-          className="text-left text-xs uppercase tracking-[0.2em] bg-stone-900/60 px-4 py-3 rounded-sm border border-stone-800 text-stone-400 hover:text-amber-500 transition-colors"
-        >
-          Load standard 5e table
-        </button>
-
-        <div className="grid grid-cols-2 gap-2">
-          <input
-            type="number"
-            min="1"
-            placeholder="Level"
-            className="rpg-input text-stone-200 px-3 py-2 rounded-sm text-sm font-body focus:outline-none placeholder:text-stone-700"
-            value={xpLevelInput}
-            onChange={(e) => setXpLevelInput(e.target.value)}
-          />
-          <input
-            type="number"
-            min="0"
-            placeholder="XP"
-            className="rpg-input text-stone-200 px-3 py-2 rounded-sm text-sm font-body focus:outline-none placeholder:text-stone-700"
-            value={xpValueInput}
-            onChange={(e) => setXpValueInput(e.target.value)}
-          />
-        </div>
-        <button
-          onClick={onAddXpRow}
-          className="fantasy-btn bg-amber-900/20 hover:bg-amber-800/40 text-amber-500 border border-amber-900/50 px-6 py-2 rounded-sm transition-all text-sm uppercase tracking-widest"
-        >
-          Add row
-        </button>
-
-        <div className="grid gap-2">
-          {(guildForm.xpTable || []).length === 0 && (
-            <div className="text-stone-600 text-sm">No XP table yet.</div>
-          )}
-          {(guildForm.xpTable || []).map((row) => (
-            <div
-              key={row.level}
-              className="flex items-center justify-between bg-stone-950/60 border border-stone-800 rounded-sm px-3 py-2"
-            >
-              <div className="text-sm text-stone-300 font-mono">
-                Level {row.level} · {row.xp} XP
-              </div>
-              <button
-                onClick={() => onRemoveXpRow(row.level)}
-                className="text-xs uppercase tracking-[0.2em] bg-red-900/20 px-3 py-2 rounded-sm border border-red-900/50 text-red-400 hover:text-red-300 transition-colors"
-              >
-                Remove
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-
-    <div className="rpg-panel p-4 sm:p-6 rounded-md">
       <div className="mb-4 border-b border-stone-800 pb-4">
         <h3 className="text-lg text-amber-500 font-fantasy">Leave guild</h3>
         <p className="text-stone-500 text-xs font-body mt-1">
@@ -3556,5 +3519,6 @@ const GuildSettingsView = ({
 );
 
 export default App;
+
 
 
