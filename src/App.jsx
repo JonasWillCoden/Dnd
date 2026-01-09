@@ -29,11 +29,11 @@ import {
   doc,
   getDoc,
   getDocs,
-  increment,
   limit,
   onSnapshot,
   orderBy,
   query,
+  runTransaction,
   serverTimestamp,
   startAfter,
   setDoc,
@@ -80,6 +80,18 @@ const defaultXpTable = [
   { level: 20, xp: 355000 },
 ];
 
+const defaultTagId = 'initiate';
+const tagOptions = [
+  { id: 'initiate', label: 'Initiate', minLevel: 1, className: 'border-stone-700 text-stone-300 bg-stone-900/60' },
+  { id: 'pathfinder', label: 'Pathfinder', minLevel: 3, className: 'border-emerald-700/60 text-emerald-300 bg-emerald-950/40' },
+  { id: 'vanguard', label: 'Vanguard', minLevel: 5, className: 'border-amber-700/60 text-amber-300 bg-amber-950/30' },
+  { id: 'warden', label: 'Warden', minLevel: 8, className: 'border-sky-700/60 text-sky-300 bg-sky-950/30' },
+  { id: 'paragon', label: 'Paragon', minLevel: 12, className: 'border-rose-700/60 text-rose-300 bg-rose-950/30' },
+  { id: 'mythic', label: 'Mythic', minLevel: 16, className: 'border-indigo-700/60 text-indigo-300 bg-indigo-950/30' },
+  { id: 'legend', label: 'Legend', minLevel: 20, className: 'border-amber-500/70 text-amber-200 bg-amber-950/40' },
+];
+
+const getTagById = (tagId) => tagOptions.find((tag) => tag.id === tagId) || null;
 const TENOR_API_KEY = import.meta.env.VITE_TENOR_KEY || 'LIVDSRZULELA';
 const TENOR_CLIENT_KEY = 'guildhall';
 const GIPHY_PUBLIC_KEY = 'dc6zaTOxFJmzC';
@@ -112,6 +124,15 @@ const getLevelForXp = (xp, table) => {
     }
   }
   return { level, nextXp };
+};
+
+const resolveUnlockedTag = (tagId, level) => {
+  const selected = getTagById(tagId);
+  const fallback = getTagById(defaultTagId);
+  if (!selected || !level || level < selected.minLevel) {
+    return fallback;
+  }
+  return selected;
 };
 
 const deriveGifUrlFromText = (text) => {
@@ -655,6 +676,14 @@ const ChatView = ({
             msg.createdAt?.toDate?.() instanceof Date
               ? msg.createdAt.toDate().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })
               : '';
+          const tag = msg.tagId ? getTagById(msg.tagId) : null;
+          if (msg.type === 'system') {
+            return (
+              <div key={msg.id} className="text-[10px] uppercase tracking-[0.3em] text-stone-600 text-center py-2">
+                {msg.text || 'System update'}
+              </div>
+            );
+          }
           return (
             <div key={msg.id} className="flex gap-3 items-start">
               <div className="w-8 h-8 rounded-full border border-stone-800 bg-stone-950 overflow-hidden flex items-center justify-center">
@@ -666,7 +695,15 @@ const ChatView = ({
               </div>
               <div className="flex-1">
                 <div className="text-[10px] uppercase tracking-[0.2em] text-stone-500">
-                  {msg.displayName || 'Unknown'} {time && <span className="ml-2 text-stone-600">{time}</span>}
+                  {msg.displayName || 'Unknown'}
+                  {tag && (
+                    <span
+                      className={`ml-2 inline-flex items-center px-2 py-0.5 rounded-full border text-[9px] uppercase tracking-[0.2em] ${tag.className}`}
+                    >
+                      {tag.label}
+                    </span>
+                  )}
+                  {time && <span className="ml-2 text-stone-600">{time}</span>}
                 </div>
                 {msg.type === 'gif' && msg.gifUrl ? (
                   <div className="mt-2 space-y-1">
@@ -1403,7 +1440,12 @@ const PreGuildHome = ({
 const App = () => {
   const [authReady, setAuthReady] = useState(false);
   const [authUser, setAuthUser] = useState(null);
-  const [profile, setProfile] = useState({ displayName: '', bio: '', avatarUrl: '' });
+  const [profile, setProfile] = useState({
+    displayName: '',
+    bio: '',
+    avatarUrl: '',
+    tagId: defaultTagId,
+  });
   const [authMode, setAuthMode] = useState('login');
   const [authError, setAuthError] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
@@ -1440,6 +1482,7 @@ const App = () => {
   const [chatInput, setChatInput] = useState('');
   const [chatOpen, setChatOpen] = useState(false);
   const [chatGuildId, setChatGuildId] = useState('');
+  const [chatMember, setChatMember] = useState(null);
   const [chatAutoScrollKey, setChatAutoScrollKey] = useState(0);
   const [chatMaximized, setChatMaximized] = useState(false);
   const [gifOpen, setGifOpen] = useState(false);
@@ -1461,7 +1504,12 @@ const App = () => {
   const [newRuleTitle, setNewRuleTitle] = useState('');
   const [newRuleDesc, setNewRuleDesc] = useState('');
   const [newSnackItem, setNewSnackItem] = useState('');
-  const [profileForm, setProfileForm] = useState({ displayName: '', bio: '', avatarUrl: '' });
+  const [profileForm, setProfileForm] = useState({
+    displayName: '',
+    bio: '',
+    avatarUrl: '',
+    tagId: defaultTagId,
+  });
   const [guildForm, setGuildForm] = useState({ name: '', description: '', imageUrl: '', xpTable: [] });
   const [profileAvatarPreview, setProfileAvatarPreview] = useState('');
   const [xpLevelInput, setXpLevelInput] = useState('');
@@ -1514,7 +1562,7 @@ const App = () => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       if (!user) {
         setAuthUser(null);
-        setProfile({ displayName: '' });
+        setProfile({ displayName: '', bio: '', avatarUrl: '', tagId: defaultTagId });
         setEmailVerified(true);
         setAuthReady(true);
         return;
@@ -1523,44 +1571,55 @@ const App = () => {
       setAuthUser(user);
       setEmailVerified(user.emailVerified);
       const userRef = doc(db, 'users', user.uid);
-      const userSnap = await getDoc(userRef);
-      if (userSnap.exists()) {
-        const data = userSnap.data();
-        const storedAvatar = localStorage.getItem(`dndhub:avatar:${user.uid}`) || '';
-        const avatarUrl = data.avatarUrl || storedAvatar || '';
-        const displayName = data.displayName || user.displayName || '';
-        setProfile({
-          displayName,
-          bio: data.bio || '',
-          avatarUrl,
-        });
-        if (avatarUrl && data.avatarUrl !== avatarUrl) {
-          setDoc(
-            userRef,
-            {
-              displayName,
-              bio: data.bio || '',
-              avatarUrl,
-            },
-            { merge: true }
-          ).catch(() => {});
-        }
-        if (avatarUrl) {
-          localStorage.setItem(`dndhub:avatar:${user.uid}`, avatarUrl);
-        }
-      } else {
-        const nameFromAuth = user.displayName || '';
-        if (nameFromAuth) {
-          await setDoc(userRef, {
-            displayName: nameFromAuth,
-            email: user.email,
-            createdAt: serverTimestamp(),
+      try {
+        const userSnap = await getDoc(userRef);
+        if (userSnap.exists()) {
+          const data = userSnap.data();
+          const storedAvatar = localStorage.getItem(`dndhub:avatar:${user.uid}`) || '';
+          const avatarUrl = data.avatarUrl || storedAvatar || '';
+          const displayName = data.displayName || user.displayName || '';
+          const tagId = data.tagId || defaultTagId;
+          setProfile({
+            displayName,
+            bio: data.bio || '',
+            avatarUrl,
+            tagId,
           });
+          if (avatarUrl && data.avatarUrl !== avatarUrl) {
+            setDoc(
+              userRef,
+              {
+                displayName,
+                bio: data.bio || '',
+                avatarUrl,
+              },
+              { merge: true }
+            ).catch(() => {});
+          }
+          if (!data.tagId) {
+            setDoc(userRef, { tagId }, { merge: true }).catch(() => {});
+          }
+          if (avatarUrl) {
+            localStorage.setItem(`dndhub:avatar:${user.uid}`, avatarUrl);
+          }
+        } else {
+          const nameFromAuth = user.displayName || '';
+          if (nameFromAuth) {
+            await setDoc(userRef, {
+              displayName: nameFromAuth,
+              email: user.email,
+              createdAt: serverTimestamp(),
+              tagId: defaultTagId,
+            });
+          }
+          setProfile({ displayName: nameFromAuth, bio: '', avatarUrl: '', tagId: defaultTagId });
         }
-        setProfile({ displayName: nameFromAuth, bio: '', avatarUrl: '' });
+      } catch (err) {
+        const fallbackName = user.displayName || '';
+        setProfile({ displayName: fallbackName, bio: '', avatarUrl: '', tagId: defaultTagId });
+      } finally {
+        setAuthReady(true);
       }
-
-      setAuthReady(true);
     });
 
     return () => unsub();
@@ -1605,27 +1664,38 @@ const App = () => {
           setGuildsLoading(false);
           return;
         }
-        const guildDocs = await Promise.all(
-          guildIds.map(async (guildId) => {
-            const [guildSnap, memberSnap] = await Promise.all([
-              getDoc(doc(db, 'guilds', guildId)),
-              getDoc(doc(db, 'guilds', guildId, 'members', authUser.uid)),
-            ]);
-            if (!guildSnap.exists() || !memberSnap.exists()) return null;
-            const guildData = guildSnap.data();
-            const memberData = memberSnap.data();
-            return {
-              guildId,
-              role: memberData.role,
-              inviteCode: memberData.inviteCode || guildData.inviteCode,
-              name: guildData.name,
-              description: guildData.description || '',
-              imageUrl: guildData.imageUrl || '',
-            };
-          })
-        );
-        setUserGuilds(guildDocs.filter(Boolean));
-        setGuildsLoading(false);
+        try {
+          const results = await Promise.allSettled(
+            guildIds.map(async (guildId) => {
+              const [guildSnap, memberSnap] = await Promise.all([
+                getDoc(doc(db, 'guilds', guildId)),
+                getDoc(doc(db, 'guilds', guildId, 'members', authUser.uid)),
+              ]);
+              if (!guildSnap.exists() || !memberSnap.exists()) return null;
+              const guildData = guildSnap.data();
+              const memberData = memberSnap.data();
+              return {
+                guildId,
+                role: memberData.role,
+                inviteCode: memberData.inviteCode || guildData.inviteCode,
+                name: guildData.name,
+                description: guildData.description || '',
+                imageUrl: guildData.imageUrl || '',
+              };
+            })
+          );
+          const loaded = results
+            .filter((result) => result.status === 'fulfilled')
+            .map((result) => result.value)
+            .filter(Boolean);
+          const hadFailures = results.some((result) => result.status === 'rejected');
+          setUserGuilds(loaded);
+          setGuildsError(hadFailures ? 'Some guilds could not be loaded.' : '');
+          setGuildsLoading(false);
+        } catch (err) {
+          setGuildsLoading(false);
+          setGuildsError(err?.message || 'Failed to load guilds.');
+        }
       },
       (err) => {
         setGuildsLoading(false);
@@ -1796,6 +1866,24 @@ const App = () => {
 
   useEffect(() => {
     if (!authUser || !chatGuildId) {
+      setChatMember(null);
+      return undefined;
+    }
+    const memberRef = doc(db, 'guilds', chatGuildId, 'members', authUser.uid);
+    const unsub = onSnapshot(
+      memberRef,
+      (snap) => {
+        setChatMember(snap.exists() ? { id: snap.id, ...snap.data() } : null);
+      },
+      () => {
+        setChatMember(null);
+      }
+    );
+    return () => unsub();
+  }, [authUser, chatGuildId]);
+
+  useEffect(() => {
+    if (!authUser || !chatGuildId) {
       setChatMessages([]);
       setChatLoading(false);
       setChatError('');
@@ -1886,8 +1974,9 @@ const App = () => {
       displayName: profile.displayName || '',
       bio: profile.bio || '',
       avatarUrl: profile.avatarUrl || '',
+      tagId: profile.tagId || defaultTagId,
     });
-  }, [profile.displayName, profile.bio, profile.avatarUrl]);
+  }, [profile.displayName, profile.bio, profile.avatarUrl, profile.tagId]);
 
   useEffect(() => {
     if (!guildData) return;
@@ -1907,19 +1996,29 @@ const App = () => {
     setGuildImagePreview(guildForm.imageUrl || '');
   }, [guildForm.imageUrl]);
 
+  const activeXpTable = guildData?.xpTable?.length ? guildData.xpTable : defaultXpTable;
+  const activeMember = guildMembers.find((member) => member.id === authUser?.uid) || null;
+  const activeMemberXp = Number.isFinite(activeMember?.xp) ? activeMember.xp : 0;
+  const activeMemberLevel = activeMember ? getLevelForXp(activeMemberXp, activeXpTable).level : null;
   const isAdmin = memberRole === 'admin' || guildData?.createdBy === authUser?.uid;
+  const chatXpTable = chatGuildId === activeGuildId ? activeXpTable : defaultXpTable;
+  const chatMemberXp = Number.isFinite(chatMember?.xp) ? chatMember.xp : 0;
+  const chatMemberLevel = chatMember ? getLevelForXp(chatMemberXp, chatXpTable).level : null;
+  const chatTag = resolveUnlockedTag(profile.tagId, chatMemberLevel);
 
   const persistProfile = async (nextProfile) => {
     if (!authUser) return;
     setProfileSaving(true);
     try {
       const avatarUrl = nextProfile.avatarUrl || '';
+      const tagId = nextProfile.tagId || defaultTagId;
       await setDoc(
         doc(db, 'users', authUser.uid),
         {
           displayName: nextProfile.displayName.trim(),
           bio: nextProfile.bio.trim(),
           avatarUrl,
+          tagId,
         },
         { merge: true }
       );
@@ -1935,6 +2034,7 @@ const App = () => {
         displayName: nextProfile.displayName.trim(),
         bio: nextProfile.bio.trim(),
         avatarUrl,
+        tagId,
       }));
     } finally {
       setProfileSaving(false);
@@ -2082,6 +2182,7 @@ const App = () => {
           displayName,
           email: cred.user.email,
           createdAt: serverTimestamp(),
+          tagId: defaultTagId,
         });
         await sendEmailVerification(cred.user);
         setVerifyNotice('Check your email to verify your account.');
@@ -2301,8 +2402,26 @@ const App = () => {
     const safeAmount = Number.isFinite(amount) ? amount : 0;
     if (!safeAmount) return;
     try {
-      await updateDoc(doc(db, 'guilds', activeGuildId, 'members', memberId), {
-        xp: increment(safeAmount),
+      const memberRef = doc(db, 'guilds', activeGuildId, 'members', memberId);
+      const chatRef = collection(db, 'guilds', activeGuildId, 'chat');
+      await runTransaction(db, async (tx) => {
+        const snap = await tx.get(memberRef);
+        if (!snap.exists()) return;
+        const data = snap.data();
+        const prevXp = Number.isFinite(data.xp) ? data.xp : 0;
+        const nextXp = prevXp + safeAmount;
+        const prevLevel = getLevelForXp(prevXp, activeXpTable).level;
+        const nextLevel = getLevelForXp(nextXp, activeXpTable).level;
+        tx.update(memberRef, { xp: nextXp });
+        if (nextLevel > prevLevel) {
+          const name = data.displayName || 'A member';
+          const systemDoc = doc(chatRef);
+          tx.set(systemDoc, {
+            type: 'system',
+            text: `${name} reached level ${nextLevel}.`,
+            createdAt: serverTimestamp(),
+          });
+        }
       });
     } catch (err) {
       setMembersError(err?.message || 'Failed to grant XP.');
@@ -2374,6 +2493,8 @@ const App = () => {
           createdBy: authUser.uid,
           displayName: profile.displayName,
           avatarUrl: profile.avatarUrl || '',
+          tagId: chatTag?.id || defaultTagId,
+          tagLabel: chatTag?.label || '',
         });
         setChatInput('');
         setChatAutoScrollKey((prev) => prev + 1);
@@ -2386,6 +2507,8 @@ const App = () => {
         createdBy: authUser.uid,
         displayName: profile.displayName,
         avatarUrl: profile.avatarUrl || '',
+        tagId: chatTag?.id || defaultTagId,
+        tagLabel: chatTag?.label || '',
       });
       setChatInput('');
       setChatAutoScrollKey((prev) => prev + 1);
@@ -2408,6 +2531,8 @@ const App = () => {
         createdBy: authUser.uid,
         displayName: profile.displayName,
         avatarUrl: profile.avatarUrl || '',
+        tagId: chatTag?.id || defaultTagId,
+        tagLabel: chatTag?.label || '',
       });
       setGifOpen(false);
       setGifQuery('');
@@ -2808,7 +2933,7 @@ const App = () => {
               onGrantXp={grantMemberXp}
               isAdmin={isAdmin}
               currentUserId={authUser?.uid || ''}
-              xpTable={guildData?.xpTable?.length ? guildData.xpTable : defaultXpTable}
+              xpTable={activeXpTable}
               guildCreatedBy={guildData?.createdBy}
             />
           ) : (
@@ -2863,6 +2988,10 @@ const App = () => {
             onSaveProfile={handleSaveProfile}
             profileSaving={profileSaving}
             onSelectProfileAvatar={handleSelectProfileAvatar}
+            tagOptions={tagOptions}
+            currentLevel={activeMemberLevel}
+            selectedTagId={profileForm.tagId}
+            onSelectTag={(tagId) => setProfileForm({ ...profileForm, tagId })}
           />
         )}
         {activeTab === 'guild-settings' && (
@@ -3348,6 +3477,10 @@ const AccountSettingsView = ({
   onSaveProfile,
   profileSaving,
   onSelectProfileAvatar,
+  tagOptions,
+  currentLevel,
+  selectedTagId,
+  onSelectTag,
 }) => (
   <div className="space-y-6 animate-fade-slide">
     <div className="rpg-panel p-4 sm:p-6 rounded-md">
@@ -3405,6 +3538,39 @@ const AccountSettingsView = ({
           value={profileForm.bio}
           onChange={(e) => setProfileForm({ ...profileForm, bio: e.target.value })}
         />
+        <div className="border-t border-stone-800 pt-4 space-y-3">
+          <div>
+            <div className="text-xs uppercase tracking-[0.2em] text-stone-500 font-bold">
+              Title tag
+            </div>
+            <p className="text-stone-500 text-xs mt-1 font-body">
+              {currentLevel ? `Unlocked by level ${currentLevel} in your active guild.` : 'Join a guild to unlock tags.'}
+            </p>
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            {tagOptions.map((tag) => {
+              const unlocked = currentLevel && currentLevel >= tag.minLevel;
+              const isActive = selectedTagId === tag.id;
+              return (
+                <button
+                  key={tag.id}
+                  onClick={() => unlocked && onSelectTag(tag.id)}
+                  className={`text-left px-3 py-2 rounded-sm border text-[10px] uppercase tracking-[0.2em] transition-all ${
+                    tag.className
+                  } ${isActive ? 'ring-1 ring-amber-500/50 border-amber-500/60' : 'border-stone-800'} ${
+                    unlocked ? 'hover:text-amber-100' : 'opacity-40 cursor-not-allowed'
+                  }`}
+                  disabled={!unlocked}
+                >
+                  <div className="text-xs font-fantasy normal-case tracking-wide">{tag.label}</div>
+                  <div className="text-[9px] uppercase tracking-[0.2em] text-stone-500">
+                    Lv {tag.minLevel}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <button
           onClick={onSaveProfile}
           disabled={profileSaving || !profileForm.displayName}

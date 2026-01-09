@@ -22,27 +22,41 @@ service cloud.firestore {
         );
     }
 
+    function onlyKeys(keys) {
+      return request.resource.data.keys().hasOnly(keys);
+    }
+
     match /users/{userId} {
-      allow read, create, update: if signedIn() && request.auth.uid == userId;
+      allow read, create, update: if signedIn()
+        && request.auth.uid == userId
+        && onlyKeys(['displayName', 'email', 'bio', 'avatarUrl', 'createdAt', 'guildIds', 'tagId']);
       allow delete: if false;
     }
 
     match /inviteCodes/{code} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.createdBy == request.auth.uid;
+      allow create: if signedIn()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.guildId is string;
       allow delete: if signedIn()
         && (
           resource.data.createdBy == request.auth.uid
-          || (resource.data.guildId is string && isMember(resource.data.guildId))
+          || (resource.data.guildId is string && isAdmin(resource.data.guildId))
         );
       allow update: if false;
     }
 
     match /guilds/{guildId} {
-      allow create: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.createdBy == request.auth.uid
+        && onlyKeys(['name', 'description', 'imageUrl', 'inviteCode', 'xpTable', 'createdAt', 'createdBy']);
       allow read: if isMember(guildId);
-      allow update: if isAdmin(guildId);
-      allow delete: if isAdmin(guildId) || isMember(guildId);
+      allow update: if isAdmin(guildId)
+        && onlyKeys(['name', 'description', 'imageUrl', 'inviteCode', 'xpTable', 'createdAt', 'createdBy'])
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.inviteCode == resource.data.inviteCode;
+      allow delete: if isAdmin(guildId);
 
       match /members/{memberId} {
         allow read: if isMember(guildId)
@@ -50,12 +64,27 @@ service cloud.firestore {
           || (resource.data.userId == request.auth.uid);
         allow create: if signedIn()
           && request.auth.uid == memberId
+          && request.resource.data.userId == request.auth.uid
           && request.resource.data.inviteCode is string
           && exists(/databases/$(database)/documents/inviteCodes/$(request.resource.data.inviteCode))
-          && get(/databases/$(database)/documents/inviteCodes/$(request.resource.data.inviteCode)).data.guildId == guildId;
+          && get(/databases/$(database)/documents/inviteCodes/$(request.resource.data.inviteCode)).data.guildId == guildId
+          && request.resource.data.role in ['admin', 'member']
+          && request.resource.data.xp is int
+          && onlyKeys(['userId', 'displayName', 'avatarUrl', 'xp', 'role', 'inviteCode', 'joinedAt']);
         allow update: if isAdmin(guildId)
-          || (isCreator(guildId) && request.auth.uid == memberId)
-          || (request.auth.uid == memberId && request.resource.data.role == resource.data.role);
+          && onlyKeys(['userId', 'displayName', 'avatarUrl', 'xp', 'role', 'inviteCode', 'joinedAt'])
+          && request.resource.data.userId == resource.data.userId
+          && request.resource.data.inviteCode == resource.data.inviteCode
+          && request.resource.data.joinedAt == resource.data.joinedAt
+          && request.resource.data.role in ['admin', 'member']
+          && request.resource.data.xp is int
+          || (request.auth.uid == memberId
+            && onlyKeys(['userId', 'displayName', 'avatarUrl', 'xp', 'role', 'inviteCode', 'joinedAt'])
+            && request.resource.data.userId == resource.data.userId
+            && request.resource.data.inviteCode == resource.data.inviteCode
+            && request.resource.data.joinedAt == resource.data.joinedAt
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.xp == resource.data.xp);
         allow delete: if isAdmin(guildId) || request.auth.uid == memberId;
       }
 
@@ -72,14 +101,32 @@ service cloud.firestore {
       }
 
       match /chat/{msgId} {
-        allow read, create: if isMember(guildId);
+        allow read: if isMember(guildId);
+        allow create: if isMember(guildId)
+          && (
+            (
+              request.resource.data.type in ['text', 'gif']
+              && request.resource.data.createdBy == request.auth.uid
+              && onlyKeys(['type', 'text', 'gifUrl', 'createdAt', 'createdBy', 'displayName', 'avatarUrl', 'tagId', 'tagLabel'])
+              && (
+                (request.resource.data.type == 'text' && request.resource.data.text is string)
+                || (request.resource.data.type == 'gif' && request.resource.data.gifUrl is string)
+              )
+            )
+            || (
+              request.resource.data.type == 'system'
+              && isAdmin(guildId)
+              && onlyKeys(['type', 'text', 'createdAt'])
+              && request.resource.data.text is string
+            )
+          );
         allow update, delete: if false;
       }
 
       match /rules/{docId} {
         allow read: if isMember(guildId);
         allow create, update: if isAdmin(guildId);
-        allow delete: if isAdmin(guildId) || isMember(guildId);
+        allow delete: if isAdmin(guildId);
       }
     }
   }
